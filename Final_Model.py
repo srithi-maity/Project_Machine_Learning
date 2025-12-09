@@ -2,7 +2,7 @@ import pandas as pd
 import numpy as np
 import os
 from xgboost import XGBRegressor, plot_importance
-from sklearn.model_selection import train_test_split
+from sklearn.model_selection import train_test_split,cross_val_score
 from sklearn.metrics import mean_squared_error
 import matplotlib.pyplot as plt
 
@@ -91,18 +91,21 @@ print("\n--- Sequence/Structure Encoding ---")
 
 
 def encode_features(df, max_len):
-    # Sequence encoding
+    # Base encoding (0-3)
     seq_encoded = np.stack(df['sequence'].apply(
-        lambda x: pad_sequence([{'A': 0, 'C': 1, 'G': 2, 'U': 3}[c] for c in x], max_len)))
+        lambda x: pad_sequence([{'A': 0, 'C': 1, 'G': 2, 'U': 3}[c] for c in x],
+                               max_len, pad_value=-1)))
 
-    # Structure encoding
+    # Structure encoding with offset 10 (10-12)
     struct_encoded = np.stack(df['structure'].apply(
-        lambda x: pad_sequence([{'.': 0, '(': 1, ')': 2}[c] for c in x], max_len)))
+        lambda x: pad_sequence([{'.': 10, '(': 11, ')': 12}[c] for c in x],
+                               max_len, pad_value=-1)))
 
-    # Loop type encoding
-    loop_map = {'S': 0, 'M': 1, 'I': 2, 'B': 3, 'H': 4, 'E': 5, 'X': 6}
+    # Loop encoding with offset 20 (20-26)
+    loop_map = {'S': 20, 'M': 21, 'I': 22, 'B': 23, 'H': 24, 'E': 25, 'X': 26}
     loop_encoded = np.stack(df['predicted_loop_type'].apply(
-        lambda x: pad_sequence([loop_map[c] for c in x], max_len)))
+        lambda x: pad_sequence([loop_map[c] for c in x],
+                               max_len, pad_value=-1)))
 
     return np.concatenate([seq_encoded, struct_encoded, loop_encoded], axis=1)
 
@@ -185,3 +188,96 @@ print("\nTest predictions sample:", y_test_pred[:5])
 
 
 
+
+
+print(f"*******************************************************************************")
+
+print(f"============ Model Improvement through Hyperparameter Tuning ============== ")
+
+print(f"_______Step 1: Prepare for Hyperparameter Tuning_______")
+
+from sklearn.model_selection import KFold
+
+# Prepare full training data
+X = X_train
+y = y_train
+
+# Set up KFold cross-validation
+kf = KFold(n_splits=5, shuffle=True, random_state=42)
+
+
+print(f"_________Step 2: Define Parameter Search Space _________")
+from sklearn.model_selection import RandomizedSearchCV
+
+param_dist = {
+    'n_estimators': [100, 200, 300, 400, 500],
+    'max_depth': [3, 4, 5, 6, 7, 8],
+    'learning_rate': [0.01, 0.05, 0.1, 0.2],
+    'subsample': [0.6, 0.7, 0.8, 0.9, 1.0],
+    'colsample_bytree': [0.6, 0.7, 0.8, 0.9, 1.0],
+    'gamma': [0, 0.1, 0.2, 0.3, 0.4],
+    'min_child_weight': [1, 2, 3, 4],
+    'reg_alpha': [0, 0.1, 1, 10],
+    'reg_lambda': [0, 0.1, 1, 10]
+}
+
+xgb = XGBRegressor(random_state=42, n_jobs=-1)
+
+random_search = RandomizedSearchCV(
+    estimator=xgb,
+    param_distributions=param_dist,
+    n_iter=50,
+    scoring='neg_root_mean_squared_error',
+    cv=kf,
+    verbose=2,
+    random_state=42
+)
+
+random_search.fit(X, y)
+
+print("Best parameters:", random_search.best_params_)
+print("Best RMSE:", -random_search.best_score_)
+
+print(f"===============Train Final Model with Best Parameters=================")
+final_model = XGBRegressor(
+    **random_search.best_params_,
+    random_state=42,
+    n_jobs=-1,
+    early_stopping_rounds=20
+)
+
+final_model.fit(X_tr, y_tr, eval_set=[(X_val, y_val)], verbose=10)
+
+# Make predictions on validation data
+y_val_pred = final_model.predict(X_val)
+
+from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score
+import numpy as np
+
+# Compute metrics
+final_rmse = np.sqrt(mean_squared_error(y_val, y_val_pred))
+final_mae = mean_absolute_error(y_val, y_val_pred)
+final_r2 = r2_score(y_val, y_val_pred)
+
+# Print them
+print("\n=== Final Model Evaluation on Validation Set ===")
+print(f"Final RMSE: {final_rmse:.4f}")
+print(f"Final MAE: {final_mae:.4f}")
+print(f"Final R² Score: {final_r2:.4f}")
+
+
+# Predict on test data
+final_test_preds = final_model.predict(X_test)
+
+# Show sample predictions
+print("\nSample Test Predictions from Final Model:")
+print(final_test_preds[:5])
+
+
+from xgboost import plot_importance
+import matplotlib.pyplot as plt
+
+plot_importance(final_model, max_num_features=20)
+plt.title('Final Model Feature Importance')
+plt.tight_layout()
+plt.show()
